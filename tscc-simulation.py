@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 
+# To do
+# Add something about spitting script version into output
+# If only running a single phase, then we need to make sure the proper files are in place from earlier
+# Allow the production phase to start at an arbitrary window
+
 import numpy as np
 import subprocess as sp
 import re as re
@@ -16,8 +21,8 @@ class simulation():
         self.system_name = 'full-HMR'
         self.minimize = False
         self.thermalize = False
-        self.equilibrate = True
-        self.produce = True
+        self.equilibrate = False
+        self.produce = False
         self.resume = False
         # File parameters
         self.minimization_prefix   = 'mini'
@@ -25,16 +30,16 @@ class simulation():
         self.equilibration_prefix  = 'eqnpt'
         self.production_prefix     = 'traj'
         self.log_file = 'full-HMR'
-        self.log = None
+        self.log = None                         # this is necessary before we open the file for writing later
         # MD engines
-        # Ideally, we don't need to pass the PBS node file here...
         self.minimization_engine   = 'mpiexec.hydra -np 6 $AMBERHOME/bin/pmemd.MPI'
         self.thermalization_engine = 'mpiexec.hydra -np 2 $AMBERHOME/bin/pmemd.cuda.MPI'
         self.equilibration_engine  = 'mpiexec.hydra -np 2 $AMBERHOME/bin/pmemd.cuda.MPI'
         self.production_engine     = 'mpiexec.hydra -np 2 $AMBERHOME/bin/pmemd.cuda.MPI'
-        # This should be set by the TSCC bash submission script hopefully...
         # self.cuda_visible_devices  = '0,1'
-        self.cuda_visible_devices  = None 
+        self.cuda_visible_devices  = None       # can be a single number like '0', a list like '0,1',
+                                                # 'tscc' where it gets set automatically, or None
+        self.cuda_visible_devices  = 'tscc'
         # Minimization parameters
         self.minimization_cycles  = 20000       # maximum minimization cycles
         self.minimization_switch  = 5           # switch to CG from SD after $ cycles
@@ -49,7 +54,7 @@ class simulation():
         self.equilibration_temp   = 300         # kelvin
         self.equilibration_steps  = 250000      # number of MD steps (nstlim) per window
         self.equilibration_out    = 500         # trajectory output frequency (steps)
-        self.equilibration_time   = 100         # total nanoseconds
+        self.equilibration_time   = 10          # total nanoseconds
         # Production MD NPT parameters
         self.production_dt     = 0.004       # femtoseconds
         self.production_temp   = 300         # kelvin
@@ -57,8 +62,9 @@ class simulation():
         self.production_out    = 500         # trajectory output frequency (steps)
         self.production_time   = 1000        # nanoseconds
         self.production_water  = False       # include water in trajectory
-        self.production_ntwprt = 3122        # include this many atoms in trajectory
-        # Add an option to iwrap
+        self.production_ntwprt = 3431        # include this many atoms in trajectory (if water is False, then this
+                                             # should be the number of atoms to keep; if water is True, then this option
+                                             # is not used )
 
     def simulate(self):
         self.start_logging()
@@ -132,6 +138,7 @@ Minimizing.
             sp.check_output(['grep -q TIMINGS {}'.format(self.minimization_prefix + '.out')], shell=True)
             print('{:<25} {:<10}'.format('...done', self.now()), file=self.log)
         except sp.CalledProcessError as e:
+            print('{:<25} {:<10}'.format('...failed', self.now()), file=self.log)
             sys.exit('Uh oh: looks like minimization failed.')
 
 
@@ -193,7 +200,7 @@ Thermalizing, NVT.
         script = open(self.thermalization_prefix + '.sh', 'w')
         script.write('#!/usr/bin/env bash\n')
         script.write('source $AMBERHOME/amber.sh\n')
-        if self.cuda_visible_devices is not None:
+        if self.cuda_visible_devices is not (None or 'tscc'):
             script.write('export CUDA_VISIBLE_DEVICES={}\n'.format(str(self.cuda_visible_devices)))
         script.write(command)
         script.close()
@@ -205,6 +212,7 @@ Thermalizing, NVT.
             sp.check_output(['grep -q TIMINGS {}'.format(self.thermalization_prefix + '.out')], shell=True)
             print('{:<25} {:<10}'.format('...done', self.now()), file=self.log)
         except sp.CalledProcessError as e:
+            print('{:<25} {:<10}'.format('...failed', self.now()), file=self.log)
             sys.exit('Uh oh: looks like thermalization failed.')
 
     def equilibration(self):
@@ -280,6 +288,7 @@ Equilibrate {} ns, NPT.
                 sp.check_output(['grep -q TIMINGS {}.{:04d}.out'.format(self.equilibration_prefix, window)], shell=True)
                 print('{:<25} {:<10}'.format('...done', self.now()), file=self.log)
             except sp.CalledProcessError as e:
+                print('{:<25} {:<10}'.format('...failed', self.now()), file=self.log)
                 sys.exit('Uh oh: looks like equilibration failed.')
             # Save the final restart
             sp.call(['cp {}.{:04d}.rst {}'.format(self.equilibration_prefix, window,
@@ -431,12 +440,13 @@ Production {} ns, NPT.
                 sp.check_output(['grep -q TIMINGS {}.{:04d}.out'.format(self.production_prefix, window)], shell=True)
                 print('{:<25} {:<10}'.format('...done', self.now()), file=self.log)
             except sp.CalledProcessError as e:
+                print('{:<25} {:<10}'.format('...failed', self.now()), file=self.log)
                 sys.exit('Uh oh: looks like production failed.')
 
     def start_logging(self):
         d_date = dt.datetime.now()
-        log_time = d_date.strftime("%Y-%m-%d-%I-%M-%S-%p")
-        self.log = open(self.log_file + '-' + log_time + '.log', 'w', 1)
+        self.log_time = d_date.strftime("%Y-%m-%d-%I-%M-%S-%p")
+        self.log = open(self.log_file + '-' + self.log_time + '.log', 'w', 1)
 
     def end_logging(self):
         self.log.close()
@@ -475,6 +485,11 @@ Production {} ns, NPT.
             print('{:<25} {:<10}'.format('production engine', self.production_engine), file=self.log)
         if self.cuda_visible_devices:
             print('{:<25} {:<10}'.format('CUDA', self.cuda_visible_devices), file=self.log)
+            nvidia_file = 'nvidia-smi-{}.log'.format(self.log_time)
+            nvidia_log = open(nvidia_file, 'w', 1)
+            print('{:<25} {:<10}'.format('...details', nvidia_file), file=self.log)
+            sp.call(['nvidia-smi'], stdout=self.log)
+            nvidia_log.close()
         if self.minimize:
             print('# Minimization parameters', file=self.log)
             print('{:<25} {:<10}'.format('minimization cycles', self.minimization_cycles), file=self.log)
